@@ -29,7 +29,7 @@ dependencies {
 
 processResources {
     inputs.property 'version', project.version
-    filesMatching('paper-plugin.yml') {
+    filesMatching('plugin.yml') {
         expand 'version': project.version
     }
 }
