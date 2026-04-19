@@ -1,0 +1,59 @@
+plugins {
+    id 'java'
+}
+
+version = project.plugin_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        name = 'PaperMC'
+        url = 'https://repo.papermc.io/repository/maven-public/'
+    }
+}
+
+dependencies {
+    compileOnly "io.papermc.paper:paper-api:${project.paper_api_version}"
+}
+
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('paper-plugin.yml') {
+        expand 'version': project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+    it.options.encoding = 'UTF-8'
+}
+
+import java.security.MessageDigest
+
+tasks.register('buildResourcePack', Zip) {
+    group = 'build'
+    description = 'Packs src/resourcepack into void-orb-pack.zip for server-side distribution.'
+    from('src/resourcepack')
+    destinationDirectory = layout.buildDirectory.dir('pack')
+    archiveFileName = 'void-orb-pack.zip'
+    doLast {
+        def zipFile = archiveFile.get().asFile
+        def sha1 = MessageDigest.getInstance('SHA-1').digest(zipFile.bytes).encodeHex().toString()
+        def sha1File = new File(zipFile.parentFile, 'void-orb-pack.sha1')
+        sha1File.text = sha1
+        println "resource pack sha1: ${sha1}"
+    }
+}
+
+build.dependsOn tasks.named('buildResourcePack')

@@ -1,0 +1,18 @@
+name: void-orb
+version: ${version}
+main: com.beard500.voidorb.VoidOrbPlugin
+api-version: '1.21'
+authors: [beard500]
+description: Throwable void_orb — a planet with a glowing Saturn ring. Delivered via server resource pack; no client install needed.
+
+commands:
+  voidorb:
+    description: Give yourself (or a target player) a void_orb.
+    usage: /voidorb give [player]
+    permission: voidorb.give
+    permission-message: "You don't have permission to use /voidorb."
+
+permissions:
+  voidorb.give:
+    description: Allows use of /voidorb give.
+    default: op

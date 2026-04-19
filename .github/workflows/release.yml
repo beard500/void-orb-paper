@@ -1,0 +1,93 @@
+name: Build and Release
+
+on:
+  push:
+    branches: ['main']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.4.1'
+
+      - name: Regenerate textures
+        run: python3 scripts/gen_textures.py
+
+      - name: Build plugin JAR + resource pack zip
+        run: gradle build --no-daemon --stacktrace
+
+      - name: Read pack SHA-1
+        id: pack
+        run: |
+          HASH=$(cat build/pack/void-orb-pack.sha1)
+          echo "sha1=${HASH}" >> "$GITHUB_OUTPUT"
+          echo "Pack SHA-1: ${HASH}"
+
+      - name: Compose release body
+        id: body
+        run: |
+          TAG="v0.1.0-r${{ github.run_number }}"
+          URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/void-orb-pack.zip"
+          {
+            echo "body<<BODY_EOF"
+            echo "## Minefort server.properties snippet"
+            echo ""
+            echo "Copy-paste these three lines into your Minefort \`server.properties\` (or the equivalent dashboard fields) and restart:"
+            echo ""
+            echo '```properties'
+            echo "resource-pack=${URL}"
+            echo "resource-pack-sha1=${{ steps.pack.outputs.sha1 }}"
+            echo "require-resource-pack=true"
+            echo '```'
+            echo ""
+            echo "## Plugin install"
+            echo ""
+            echo "Download \`void-orb-0.1.0.jar\` below → upload to your server's \`plugins/\` folder via the Minefort dashboard or SFTP → restart the server."
+            echo ""
+            echo "## What's in this release"
+            echo ""
+            echo "- \`void-orb-0.1.0.jar\` — the Paper plugin (goes in \`plugins/\`)"
+            echo "- \`void-orb-pack.zip\` — the server-shipped resource pack (referenced by URL; do NOT upload this to the server)"
+            echo ""
+            echo "Commit: ${{ github.sha }}"
+            echo "BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: void-orb-artifacts
+          path: |
+            build/libs/*.jar
+            build/pack/void-orb-pack.zip
+            build/pack/void-orb-pack.sha1
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.body.outputs.tag }}
+          name: void_orb build ${{ github.run_number }}
+          body: ${{ steps.body.outputs.body }}
+          files: |
+            build/libs/void-orb-0.1.0.jar
+            build/pack/void-orb-pack.zip
+          fail_on_unmatched_files: true
+          make_latest: true
