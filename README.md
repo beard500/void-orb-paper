@@ -48,17 +48,25 @@ downloadable assets.
 
 ### Step 2 — Point the server at the resource pack
 
-1. In the same GitHub Release, copy the three lines from the
-   **"Minefort server.properties snippet"** box. They look like:
+1. Open the [**latest release**](https://github.com/beard500/void-orb-paper/releases/latest).
+2. Copy the three lines from the **"Minefort server.properties snippet"** box
+   in the release notes. **Those lines contain the real release tag and SHA-1
+   for that specific build** — do not hand-edit them, and do not copy them
+   from this README (this README can only show placeholders). Shape:
    ```properties
-   resource-pack=https://github.com/beard500/void-orb-paper/releases/download/v0.1.0-rN/void-orb-pack.zip
-   resource-pack-sha1=<40-char hex>
+   resource-pack=https://github.com/beard500/void-orb-paper/releases/download/v0.1.0-r<BUILD_NUMBER>/void-orb-pack.zip
+   resource-pack-sha1=<40-char hex, unique per release>
    require-resource-pack=true
    ```
-2. In the Minefort dashboard → **Server Properties** (or open
+3. In the Minefort dashboard → **Server Properties** (or open
    `server.properties` directly via the file manager).
-3. Paste the three lines. If any of those keys already exist, overwrite them.
-4. Restart the server.
+4. Paste the three lines. If any of those keys already exist, overwrite them.
+5. Restart the server.
+
+> **Common mistake:** copying `v0.1.0-rN` literally from a placeholder. The
+> `rN` is a template — the real release tag is `v0.1.0-r1`, `r2`, `r3`, etc.
+> If you see "failed to download" in server logs, the most likely cause is
+> that the URL still contains `rN` or points to a release that doesn't exist.
 
 **About `require-resource-pack=true`:** this forces clients to accept the pack
 to join. If a player declines, they can't join. If you'd rather allow optional
