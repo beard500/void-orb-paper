@@ -4,7 +4,6 @@ import io.papermc.paper.event.player.PrePlayerAttackEntityEvent;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
-import org.bukkit.FluidCollisionMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
@@ -18,6 +17,8 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.damage.DamageSource;
 import org.bukkit.damage.DamageType;
 import org.bukkit.entity.EnderDragon;
+import org.bukkit.entity.EnderPearl;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
@@ -26,6 +27,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.entity.ProjectileHitEvent;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
@@ -38,7 +40,6 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitRunnable;
-import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 import org.jetbrains.annotations.NotNull;
 
@@ -51,15 +52,15 @@ import java.util.UUID;
 /**
  * void_orb — a throwable custom item for Paper 1.21.11.
  * <p>
- * Right-click launches a piercing orb that damages LivingEntities along its path
- * and returns to the owner like a loyalty trident. Left-click while the orb is
- * in flight teleports the player to the orb's current position. Left-click on
- * an entity with no orb in flight levitates the target. Guaranteed drop from
- * the Ender Dragon; infinite durability (never consumed on throw).
+ * Flight model has three phases: OUTBOUND (real EnderPearl entity, vanilla
+ * physics, pierces enemies via cancelled hit events), LANDED (stationary Item
+ * entity, 3-second pause at hit location), RETURNING (Item entity homes to
+ * owner at the same speed it was thrown at). Left-click teleports the player
+ * to the orb's current position at any phase.
  */
 public final class VoidOrbPlugin extends JavaPlugin implements Listener, CommandExecutor {
 
-    /** PDC key marking both the item and the flight visual as ours. */
+    /** PDC key marking the item and the in-flight entity as ours. */
     private NamespacedKey markerKey;
 
     /** Identifier pointing at the item model shipped in the resource pack. */
@@ -68,12 +69,9 @@ public final class VoidOrbPlugin extends JavaPlugin implements Listener, Command
 
     // Flight tuning
     private static final double MAX_RANGE = 48.0;
-    private static final int MAX_OUTBOUND_TICKS = 60;
-    private static final int HARD_CAP_TICKS = 200;
-    private static final double THROW_SPEED = 1.8;
-    private static final double RETURN_SPEED = 1.8;
+    private static final int OUTBOUND_HARD_CAP_TICKS = 100; // 5s ceiling for OUTBOUND
+    private static final int LANDED_DURATION_TICKS = 60;    // 3s pause after landing
     private static final double ORB_DAMAGE = 9.0;
-    private static final double PIERCE_RADIUS = 1.5;
     private static final double RETURN_CATCH_DISTANCE = 1.5;
 
     // Cooldown tuning (ticks)
@@ -122,6 +120,18 @@ public final class VoidOrbPlugin extends JavaPlugin implements Listener, Command
         if (meta == null) return false;
         Byte marker = meta.getPersistentDataContainer().get(markerKey, PersistentDataType.BYTE);
         return marker != null && marker == (byte) 1;
+    }
+
+    private boolean isOurPearl(EnderPearl pearl) {
+        Byte marker = pearl.getPersistentDataContainer().get(markerKey, PersistentDataType.BYTE);
+        return marker != null && marker == (byte) 1;
+    }
+
+    private OrbFlight findFlightByPearl(EnderPearl pearl) {
+        for (OrbFlight flight : orbsInFlight.values()) {
+            if (flight.pearlEntity == pearl) return flight;
+        }
+        return null;
     }
 
     private boolean isOnTeleportCooldown(Player player) {
@@ -192,7 +202,7 @@ public final class VoidOrbPlugin extends JavaPlugin implements Listener, Command
         if (orbsInFlight.containsKey(uuid)) return;
         if (isOnTeleportCooldown(player)) return;
 
-        launchOrb(player, stack);
+        launchOrb(player);
     }
 
     @EventHandler
@@ -240,6 +250,38 @@ public final class VoidOrbPlugin extends JavaPlugin implements Listener, Command
     }
 
     @EventHandler
+    public void onProjectileHit(ProjectileHitEvent event) {
+        if (!(event.getEntity() instanceof EnderPearl pearl)) return;
+        if (!isOurPearl(pearl)) return;
+
+        event.setCancelled(true); // no vanilla teleport, ever
+
+        OrbFlight flight = findFlightByPearl(pearl);
+        if (flight == null || flight.transitioning) return;
+
+        Entity hitEntity = event.getHitEntity();
+        if (hitEntity instanceof LivingEntity target
+                && !target.getUniqueId().equals(flight.ownerId)) {
+            if (flight.hits.add(target.getUniqueId())) {
+                Player owner = getServer().getPlayer(flight.ownerId);
+                DamageSource src = DamageSource.builder(DamageType.MAGIC)
+                        .withDirectEntity(pearl)
+                        .withCausingEntity(owner)
+                        .build();
+                target.damage(ORB_DAMAGE, src);
+                target.getWorld().spawnParticle(Particle.REVERSE_PORTAL,
+                        target.getLocation().add(0, 1, 0),
+                        15, 0.3, 0.5, 0.3, 0.05);
+            }
+            return; // pearl continues piercing
+        }
+
+        if (event.getHitBlock() != null || hitEntity != null) {
+            flight.transitionToLanded(pearl.getLocation());
+        }
+    }
+
+    @EventHandler
     public void onDragonDeath(EntityDeathEvent event) {
         if (event.getEntity() instanceof EnderDragon) {
             event.getDrops().add(createVoidOrbStack());
@@ -266,29 +308,23 @@ public final class VoidOrbPlugin extends JavaPlugin implements Listener, Command
         if (flight != null) flight.forceEnd();
     }
 
-    private void launchOrb(Player player, ItemStack heldStack) {
-        Location eye = player.getEyeLocation();
-        Vector dir = eye.getDirection().multiply(THROW_SPEED);
-
-        Item itemEntity = player.getWorld().dropItem(eye, createVoidOrbStack());
-        itemEntity.setGravity(false);
-        itemEntity.setPickupDelay(Integer.MAX_VALUE);
-        itemEntity.setPersistent(false);
-        itemEntity.setVelocity(dir);
-        itemEntity.getPersistentDataContainer()
+    private void launchOrb(Player player) {
+        EnderPearl pearl = player.launchProjectile(EnderPearl.class);
+        pearl.setItem(createVoidOrbStack());
+        pearl.getPersistentDataContainer()
                 .set(markerKey, PersistentDataType.BYTE, (byte) 1);
 
         player.getWorld().playSound(player.getLocation(),
                 Sound.BLOCK_PORTAL_TRIGGER, SoundCategory.PLAYERS,
                 0.5f, 1.6f + (float) (Math.random() * 0.2));
 
-        OrbFlight flight = new OrbFlight(player.getUniqueId(), itemEntity, dir);
+        OrbFlight flight = new OrbFlight(player.getUniqueId(), pearl);
         orbsInFlight.put(player.getUniqueId(), flight);
         flight.runTaskTimer(this, 1L, 1L);
     }
 
     private void teleportToOrb(Player player, OrbFlight flight) {
-        Location orbLoc = flight.itemEntity.getLocation();
+        Location orbLoc = flight.getCurrentLocation();
         Location dest = new Location(orbLoc.getWorld(), orbLoc.getX(), orbLoc.getY(), orbLoc.getZ(),
                 player.getLocation().getYaw(), player.getLocation().getPitch());
 
@@ -315,28 +351,70 @@ public final class VoidOrbPlugin extends JavaPlugin implements Listener, Command
 
     /**
      * Drives an orb from throw to return. One instance per in-flight orb.
-     * OUTBOUND: orb flies in the throw direction, piercing LivingEntities.
-     * RETURNING: orb homes back to the owner.
+     * OUTBOUND: real EnderPearl with vanilla physics; piercing via cancelled hit events.
+     * LANDED: stationary Item entity, 3-second pause at hit location.
+     * RETURNING: Item entity homes to owner at recorded throw speed.
      */
     private final class OrbFlight extends BukkitRunnable {
-        private static final int STATE_OUTBOUND = 0;
-        private static final int STATE_RETURNING = 1;
+        enum Phase { OUTBOUND, LANDED, RETURNING }
 
-        private final UUID ownerId;
-        final Item itemEntity;
-        private final Set<UUID> hits = new HashSet<>();
-        private Vector velocity;
-        private int state = STATE_OUTBOUND;
-        private int ticksAlive = 0;
-        private double blocksTraveled = 0;
-        private Location lastLocation;
-        private boolean ended = false;
+        final UUID ownerId;
+        EnderPearl pearlEntity;   // non-null during OUTBOUND
+        Item itemEntity;          // non-null during LANDED + RETURNING
+        final Set<UUID> hits = new HashSet<>();
+        Phase phase = Phase.OUTBOUND;
+        int ticksAlive = 0;
+        int landedTicksRemaining = 0;
+        boolean transitioning = false;
+        boolean ended = false;
+        final Location launchLocation;
+        final double throwSpeedMagnitude;
 
-        OrbFlight(UUID ownerId, Item itemEntity, Vector initialVelocity) {
+        OrbFlight(UUID ownerId, EnderPearl pearl) {
             this.ownerId = ownerId;
-            this.itemEntity = itemEntity;
-            this.velocity = initialVelocity.clone();
-            this.lastLocation = itemEntity.getLocation();
+            this.pearlEntity = pearl;
+            this.launchLocation = pearl.getLocation().clone();
+            // vanilla pearl velocity at launch = throw speed we reuse for RETURNING
+            double mag = pearl.getVelocity().length();
+            this.throwSpeedMagnitude = mag > 0.1 ? mag : 1.5;
+        }
+
+        Location getCurrentLocation() {
+            if (phase == Phase.OUTBOUND && pearlEntity != null && pearlEntity.isValid()) {
+                return pearlEntity.getLocation();
+            }
+            if (itemEntity != null && itemEntity.isValid()) {
+                return itemEntity.getLocation();
+            }
+            return launchLocation;
+        }
+
+        void transitionToLanded(Location hitLoc) {
+            if (transitioning) return;
+            transitioning = true;
+
+            if (pearlEntity != null && pearlEntity.isValid()) {
+                pearlEntity.remove();
+            }
+            pearlEntity = null;
+
+            World world = hitLoc.getWorld();
+            Item item = world.dropItem(hitLoc, createVoidOrbStack());
+            item.setGravity(false);
+            item.setPickupDelay(Integer.MAX_VALUE);
+            item.setPersistent(false);
+            item.setVelocity(new Vector(0, 0, 0));
+            item.getPersistentDataContainer()
+                    .set(markerKey, PersistentDataType.BYTE, (byte) 1);
+
+            this.itemEntity = item;
+            this.phase = Phase.LANDED;
+            this.landedTicksRemaining = LANDED_DURATION_TICKS;
+
+            world.spawnParticle(Particle.REVERSE_PORTAL, hitLoc,
+                    20, 0.2, 0.2, 0.2, 0.15);
+            world.playSound(hitLoc, Sound.BLOCK_AMETHYST_BLOCK_BREAK,
+                    SoundCategory.NEUTRAL, 0.6f, 0.8f);
         }
 
         @Override
@@ -344,84 +422,107 @@ public final class VoidOrbPlugin extends JavaPlugin implements Listener, Command
             if (ended) return;
 
             Player owner = getServer().getPlayer(ownerId);
-            if (owner == null || !owner.isOnline() || owner.isDead()
-                    || !owner.getWorld().equals(itemEntity.getWorld())
-                    || !itemEntity.isValid()) {
+            if (owner == null || !owner.isOnline() || owner.isDead()) {
+                forceEnd();
+                orbsInFlight.remove(ownerId);
+                return;
+            }
+
+            World orbWorld = (pearlEntity != null && pearlEntity.isValid())
+                    ? pearlEntity.getWorld()
+                    : (itemEntity != null && itemEntity.isValid() ? itemEntity.getWorld() : null);
+            if (orbWorld == null || !owner.getWorld().equals(orbWorld)) {
+                forceEnd();
+                orbsInFlight.remove(ownerId);
+                return;
+            }
+
+            switch (phase) {
+                case OUTBOUND -> tickOutbound();
+                case LANDED -> tickLanded();
+                case RETURNING -> tickReturning(owner);
+            }
+        }
+
+        private void tickOutbound() {
+            if (pearlEntity == null || !pearlEntity.isValid() || pearlEntity.isDead()) {
                 forceEnd();
                 orbsInFlight.remove(ownerId);
                 return;
             }
 
             ticksAlive++;
-            if (ticksAlive > HARD_CAP_TICKS) {
+            Location current = pearlEntity.getLocation();
+
+            if (ticksAlive > OUTBOUND_HARD_CAP_TICKS) {
+                transitionToLanded(current);
+                return;
+            }
+            if (current.distance(launchLocation) > MAX_RANGE) {
+                transitionToLanded(current);
+                return;
+            }
+
+            current.getWorld().spawnParticle(Particle.PORTAL, current,
+                    2, 0.05, 0.05, 0.05, 0.02);
+        }
+
+        private void tickLanded() {
+            if (itemEntity == null || !itemEntity.isValid()) {
+                forceEnd();
+                orbsInFlight.remove(ownerId);
+                return;
+            }
+
+            itemEntity.setVelocity(new Vector(0, 0, 0));
+            landedTicksRemaining--;
+
+            if (landedTicksRemaining % 10 == 0) {
+                itemEntity.getWorld().spawnParticle(Particle.REVERSE_PORTAL,
+                        itemEntity.getLocation().add(0, 0.3, 0),
+                        4, 0.15, 0.15, 0.15, 0.02);
+            }
+
+            if (landedTicksRemaining <= 0) {
+                phase = Phase.RETURNING;
+            }
+        }
+
+        private void tickReturning(Player owner) {
+            if (itemEntity == null || !itemEntity.isValid()) {
                 forceEnd();
                 orbsInFlight.remove(ownerId);
                 return;
             }
 
             Location current = itemEntity.getLocation();
-            World world = current.getWorld();
+            Location target = owner.getEyeLocation();
+            Vector toOwner = target.toVector().subtract(current.toVector());
+            double dist = toOwner.length();
 
-            // Block collision — raycast the segment actually traveled since last tick.
-            if (state == STATE_OUTBOUND) {
-                Vector travel = current.toVector().subtract(lastLocation.toVector());
-                double travelLen = travel.length();
-                if (travelLen > 0.001) {
-                    RayTraceResult blockHit = world.rayTraceBlocks(
-                            lastLocation, travel.clone().normalize(), travelLen,
-                            FluidCollisionMode.NEVER, true);
-                    if (blockHit != null && blockHit.getHitBlock() != null) {
-                        state = STATE_RETURNING;
-                    }
-                }
+            if (dist < RETURN_CATCH_DISTANCE) {
+                current.getWorld().playSound(current, Sound.BLOCK_AMETHYST_BLOCK_CHIME,
+                        SoundCategory.PLAYERS, 0.8f, 1.2f);
+                current.getWorld().spawnParticle(Particle.REVERSE_PORTAL, current,
+                        20, 0.2, 0.2, 0.2, 0.15);
+                forceEnd();
+                orbsInFlight.remove(ownerId);
+                return;
             }
 
-            // Pierce damage — one hit per entity per flight.
-            for (LivingEntity candidate : world.getNearbyLivingEntities(
-                    current, PIERCE_RADIUS,
-                    le -> !le.getUniqueId().equals(ownerId) && !hits.contains(le.getUniqueId()))) {
-                hits.add(candidate.getUniqueId());
-                DamageSource src = DamageSource.builder(DamageType.MAGIC)
-                        .withDirectEntity(itemEntity)
-                        .withCausingEntity(owner)
-                        .build();
-                candidate.damage(ORB_DAMAGE, src);
-                world.spawnParticle(Particle.REVERSE_PORTAL,
-                        candidate.getLocation().add(0, 1, 0),
-                        15, 0.3, 0.5, 0.3, 0.05);
-            }
-
-            blocksTraveled += current.distance(lastLocation);
-            if (state == STATE_OUTBOUND
-                    && (blocksTraveled > MAX_RANGE || ticksAlive > MAX_OUTBOUND_TICKS)) {
-                state = STATE_RETURNING;
-            }
-
-            world.spawnParticle(Particle.PORTAL, current, 3, 0.05, 0.05, 0.05, 0.05);
-
-            if (state == STATE_RETURNING) {
-                Location target = owner.getEyeLocation();
-                Vector toOwner = target.toVector().subtract(current.toVector());
-                double dist = toOwner.length();
-                if (dist < RETURN_CATCH_DISTANCE) {
-                    world.playSound(current, Sound.BLOCK_AMETHYST_BLOCK_CHIME,
-                            SoundCategory.PLAYERS, 0.8f, 1.2f);
-                    world.spawnParticle(Particle.REVERSE_PORTAL, current,
-                            20, 0.2, 0.2, 0.2, 0.15);
-                    forceEnd();
-                    orbsInFlight.remove(ownerId);
-                    return;
-                }
-                velocity = toOwner.normalize().multiply(RETURN_SPEED);
-            }
-
+            Vector velocity = toOwner.normalize().multiply(throwSpeedMagnitude);
             itemEntity.setVelocity(velocity);
-            lastLocation = current.clone();
+
+            current.getWorld().spawnParticle(Particle.PORTAL, current,
+                    2, 0.05, 0.05, 0.05, 0.02);
         }
 
         void forceEnd() {
             if (ended) return;
             ended = true;
+            if (pearlEntity != null && pearlEntity.isValid()) {
+                pearlEntity.remove();
+            }
             if (itemEntity != null && itemEntity.isValid()) {
                 itemEntity.remove();
             }
