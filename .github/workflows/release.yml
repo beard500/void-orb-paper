@@ -42,7 +42,9 @@ jobs:
       - name: Compose release body
         id: body
         run: |
-          TAG="v0.1.0-r${{ github.run_number }}"
+          VERSION=$(grep '^plugin_version=' gradle.properties | cut -d= -f2)
+          JAR="void-orb-${VERSION}.jar"
+          TAG="v${VERSION}-r${{ github.run_number }}"
           URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/void-orb-pack.zip"
           {
             echo "body<<BODY_EOF"
@@ -58,17 +60,19 @@ jobs:
             echo ""
             echo "## Plugin install"
             echo ""
-            echo "Download \`void-orb-0.1.0.jar\` below → upload to your server's \`plugins/\` folder via the Minefort dashboard or SFTP → restart the server."
+            echo "Download \`${JAR}\` below → upload to your server's \`plugins/\` folder via the Minefort dashboard or SFTP → restart the server."
             echo ""
             echo "## What's in this release"
             echo ""
-            echo "- \`void-orb-0.1.0.jar\` — the Paper plugin (goes in \`plugins/\`)"
+            echo "- \`${JAR}\` — the Paper plugin (goes in \`plugins/\`)"
             echo "- \`void-orb-pack.zip\` — the server-shipped resource pack (referenced by URL; do NOT upload this to the server)"
             echo ""
             echo "Commit: ${{ github.sha }}"
             echo "BODY_EOF"
           } >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "jar=${JAR}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Upload CI artifacts
         uses: actions/upload-artifact@v4
@@ -87,7 +91,7 @@ jobs:
           name: void_orb build ${{ github.run_number }}
           body: ${{ steps.body.outputs.body }}
           files: |
-            build/libs/void-orb-0.1.0.jar
+            build/libs/*.jar
             build/pack/void-orb-pack.zip
           fail_on_unmatched_files: true
           make_latest: true
